@@ -1,0 +1,1 @@
+usage: obsctl [-s <server>] [-p <password>] <command>
