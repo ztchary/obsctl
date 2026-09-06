@@ -7,12 +7,23 @@
 #include <getopt.h>
 #include "commands.h"
 
-bool run = true;
+int run = 1;
 int ret = 1;
 char *server;
 char *passwd;
 char **req;
 struct json_object *request;
+
+// ripped from clibs (because this is better than c23)
+char *strndup(const char *s, size_t n)
+{
+    char* new = malloc(n+1);
+    if (new) {
+        strncpy(new, s, n);
+        new[n] = '\0';
+    }
+    return new;
+}
 
 int compute_auth(const char *pass, const char *salt, const char *chal, char *out) {
 	char concat[256];
@@ -32,11 +43,11 @@ static int ws_callback(struct lws *wsi, enum lws_callback_reasons reason, void *
 		switch (reason) {
 			case LWS_CALLBACK_CLIENT_CONNECTION_ERROR:
 				fprintf(stderr, "failed to connect to obs\n");
-				run = false;
+				run = 0;
 				break;
 			case LWS_CALLBACK_WS_PEER_INITIATED_CLOSE:
 				fprintf(stderr, "incorrect password\n");
-				run = false;
+				run = 0;
 			default:
 				break;
 		}
@@ -63,7 +74,7 @@ static int ws_callback(struct lws *wsi, enum lws_callback_reasons reason, void *
 		if (json_object_object_get_ex(jd, "authentication", &ja)) {
 			if (passwd == NULL) {
 				fprintf(stderr, "server requires a password\n");
-				run = false;
+				run = 0;
 				break;
 			}
 			json_object_object_get_ex(ja, "salt", &jb);
@@ -82,7 +93,7 @@ static int ws_callback(struct lws *wsi, enum lws_callback_reasons reason, void *
 		lws_write(wsi, (unsigned char *)buf + LWS_PRE, printlen, LWS_WRITE_TEXT);
 		break;
 	case 7:
-		run = false;
+		run = 0;
 		json_object_object_get_ex(jd, "requestStatus", &ja);
 		json_object_object_get_ex(ja, "code", &jb);
 		if (json_object_get_int(jb) != 100) {
@@ -166,17 +177,16 @@ int parse_params(const struct Command *cmd, int argc, char **argv, struct json_o
 			continue;
 		}
 		char *pname = strndup(*argv, eq++ - *argv);
+		int success = 0;
 		for (int j = start_opt; j < cmd->nparam; j++) {
 			if (strcmp(cmd->param[j].name, pname) != 0) continue;
-			argc--; argv++;
+			argc--; argv++; i++;
 			json_object_object_add(data, pname, json_object_new_string(eq));
-			free(pname);
-			pname = NULL;
+			success = 1;
+			break;
 		}
-		if (pname) {
-			free(pname);
-			return 1;
-		}
+		free(pname);
+		if (!success) return -1;
 	}
 	return 0;
 }
@@ -257,7 +267,7 @@ int main(int argc, char **argv) {
 	json_object_object_add(request, "op", op);
 	json_object_object_add(request, "d", d);
 
-	char *host = strdup(server + 5);
+	char *host = strndup(server + 5, strlen(server));
 	char *col = strchr(host, ':');
 	*col = 0;
 	int port = atoi(col + 1);
@@ -288,4 +298,6 @@ int main(int argc, char **argv) {
 
 	lws_context_destroy(ctx);
 	json_object_put(request);
+
+	return ret;
 }

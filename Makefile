@@ -1,4 +1,4 @@
-CFLAGS=-Wall -Werror `pkg-config --cflags json-c libwebsockets`
+CFLAGS=-Wall -Werror -std=c99 -pedantic `pkg-config --cflags json-c libwebsockets`
 LIBS=`pkg-config --libs json-c libwebsockets` -lcrypto
 
 .PHONY: clean all
@@ -17,6 +17,9 @@ commands.h: protocol.json gen_commands.py
 readme: obsctl
 	echo -e "# obsctl\nauto-generated readme because idc\n---\n" > README.md
 	obsctl --help | sed 's/^  /- /' >> README.md
+
+install: obsctl
+	install -m 755 obsctl /usr/bin
 
 clean:
 	rm -f protocol.json
