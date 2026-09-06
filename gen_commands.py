@@ -20,14 +20,14 @@ LEVELS = [
         "media", "filter", "service", "directory", "item", "deinterlace",
         "preview", "program", "filters", "interact", "projector"
     ], [
-        "settings", "transform", "field", "order",
+        "settings", "field", "order",
         "balance", "monitor", "sync", "tracks", "duration"
     ], [
         "get", "set", "toggle", "trigger", "list", "create", "remove", "start",
         "stop", "resume", "pause", "open", "save", "call", "broadcast", "send",
         "split", "duplicate", "sleep", "press", "default", "offset", "status",
         "current", "last", "vendor", "request", "enabled", "locked", "index",
-        "blend", "version", "stats", "button", "action", "file", "name",
+        "blend", "version", "stats", "button", "action", "file", "name", "transform",
         "position", "override", "param", "cursor", "type", "screenshot",
         "caption", "dialog", "chapter", "active", "kinds", "items", "id"
     ]
@@ -80,13 +80,12 @@ struct Command {
     const char *desc;
     const char *type;
     const struct Param *param;
-    const struct Command *sub;
+    const struct Command **sub;
     int nparam;
     int nsub;
 };
 \n"""
 
-tree = {}
 TYPES = {
     "Any": 0,
     "String": 1,
@@ -94,6 +93,27 @@ TYPES = {
     "Boolean": 3,
     "Object": 4,
 }
+
+tree = {"desc": """\
+OBS Websocket Commandline Utility.
+
+Flags:
+  [-h | --help]            : print help text for a subcommand
+  [-s | --server] <server> : specify a server address (eg. ws://1.2.3.4:5678)
+  [-p | --passwd] <passwd> : specify a password, if the server requires auth
+
+Required arguments for subcommands are passed positionally.
+Optional arguments are either passed positionally or
+by 'key=value' pairs
+
+If an argument contains '=', it must be passed as a 'key=value' pair
+
+Server and password arguments can also be
+passed through environment variables, which
+makes scripting way easier. for example:
+
+export OBSCTL_PASSWD=password1
+obsctl record toggle"""}
 
 for req in protocol["requests"]:
     typ = req["requestType"]
@@ -110,7 +130,7 @@ for req in protocol["requests"]:
     cur["typ"] = typ
     cur["param"] = []
     
-    for param in req["requestFields"]:
+    for param in sorted(req["requestFields"], key=lambda x:x["valueOptional"]):
         name = json.dumps(param["valueName"])
         desc = json.dumps(param["valueDescription"])
         typ = TYPES[param["valueType"]]
@@ -119,14 +139,18 @@ for req in protocol["requests"]:
 
 c_lines = []
 
+def sort_key(item):
+    i = int("desc" not in item[1])
+    return f"{i}{item[0]}"
+
 def walk(node, id, cmd):
     child_ids = []
     if "sub" in node:
-        for sub_id, sub_node in node["sub"].items():
+        for sub_id, sub_node in sorted(node["sub"].items(), key=sort_key):
             child_ids.append(walk(sub_node, f"{id}_{sub_id.replace('-', '_')}", sub_id))
 
     if child_ids:
-        c_lines.append(f"static const struct Command {id}_subcmd[] = {{\n\t{"_cmd,\n\t".join(child_ids)}_cmd\n}};\n")
+        c_lines.append(f"static const struct Command *{id}_subcmd[] = {{\n\t&{"_cmd,\n\t&".join(child_ids)}_cmd\n}};\n")
 
     doparam = "param" in node and len(node["param"]) > 0
     if doparam:
@@ -139,7 +163,7 @@ def walk(node, id, cmd):
         f"static const struct Command {id}_cmd = {{", # }
         f"\t{json.dumps(cmd)},",
         f"\t{json.dumps(node["desc"]) if "desc" in node else "NULL"},",
-        f"\t{json.dumps(node["typ"]) if "desc" in node else "NULL"},",
+        f"\t{json.dumps(node["typ"]) if "typ" in node else "NULL"},",
         f"\t{node["typ"]}_param," if doparam else "\tNULL,",
         f"\t{id}_subcmd," if "sub" in node else "\tNULL,",
         f"\t{len(node["param"]) if "param" in node else 0},",

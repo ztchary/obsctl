@@ -12,6 +12,7 @@ int ret = 1;
 char *server;
 char *passwd;
 char **req;
+struct json_object *request;
 
 int compute_auth(const char *pass, const char *salt, const char *chal, char *out) {
 	char concat[256];
@@ -77,7 +78,7 @@ static int ws_callback(struct lws *wsi, enum lws_callback_reasons reason, void *
 		lws_write(wsi, (unsigned char *)buf + LWS_PRE, printlen, LWS_WRITE_TEXT);
 		break;
 	case 2:
-		printlen = snprintf(buf + LWS_PRE, sizeof(buf), "{\"op\":6,\"d\":{\"requestId\":0,\"requestType\":\"%s\"%s}}", req[0], req[1] ? req[1] : "");
+		printlen = snprintf(buf + LWS_PRE, sizeof(buf), "%s", json_object_to_json_string(request));
 		lws_write(wsi, (unsigned char *)buf + LWS_PRE, printlen, LWS_WRITE_TEXT);
 		break;
 	case 7:
@@ -105,31 +106,156 @@ static const struct lws_protocols protocols[] = {
 	{ 0 }
 };
 
+const struct Command *get_subcmd(const struct Command *root, const char *substr) {
+	for (int i = 0; i < root->nsub; i++) {
+		if (strcmp(root->sub[i]->cmd, substr) == 0) return root->sub[i];
+	}
+	return NULL;
+}
+
+void print_usage(int argc, char **argv, FILE *out) {
+	char fullcmd[512];
+	const struct Command *cmd = &obsctl_cmd;
+	sprintf(fullcmd, "obsctl [flags]");
+	for (int i = 0; i < argc; i++) {
+		const struct Command *sub = get_subcmd(cmd, argv[i]);
+		if (sub == NULL) break;
+		sprintf(fullcmd + strlen(fullcmd), " %s", sub->cmd);
+		cmd = sub;
+	}
+
+	if (cmd->type) {
+		for (int i = 0; i < cmd->nparam; i++) {
+			const struct Param *param = &cmd->param[i];
+			sprintf(fullcmd + strlen(fullcmd), param->opt ? " [%s]" : " <%s>", param->name);
+		}
+		fprintf(out, "Usage: %s\n\n%s\n\nParams:\n", fullcmd, cmd->desc);
+		for (int i = 0; i < cmd->nparam; i++) {
+			const struct Param *param = &cmd->param[i];
+			fprintf(out, "  %s: %s (%s)\n", param->name, param->desc, param->opt ? "optional" : "required");
+		}
+		return;
+	}
+	fprintf(out, "Usage: %s <subcommand>\n\n", fullcmd);
+	if (cmd->desc) fprintf(out, "%s\n\n", cmd->desc);
+	fprintf(out, "Subcommands:\n");
+
+	for (int i = 0; i < cmd->nsub; i++) {
+		const struct Command *sub = cmd->sub[i];
+		int len = sub->desc ? strcspn(sub->desc, ".") : 0;
+		if (sub->desc) fprintf(out, "  %-20s : %.*s.\n", sub->cmd, len, sub->desc);
+		else fprintf(out, "  %s ...\n", sub->cmd);
+	}
+}
+
+int parse_params(const struct Command *cmd, int argc, char **argv, struct json_object *data) {
+	int i;
+	for (i = 0; i < cmd->nparam; i++) {
+		if (cmd->param[i].opt) break;
+		if (argc == 0) return -1;
+		argc--;
+		json_object_object_add(data, cmd->param[i].name, json_object_new_string(*(argv++)));
+	}
+	int start_opt = i;
+	while (argc > 0) {
+		if (i >= cmd->nparam) return -1;
+		const char *eq = strchr(*argv, '=');
+		if (!eq) {
+			argc--;
+			json_object_object_add(data, cmd->param[i++].name, json_object_new_string(*(argv++)));
+			continue;
+		}
+		char *pname = strndup(*argv, eq++ - *argv);
+		for (int j = start_opt; j < cmd->nparam; j++) {
+			if (strcmp(cmd->param[j].name, pname) != 0) continue;
+			argc--; argv++;
+			json_object_object_add(data, pname, json_object_new_string(eq));
+			free(pname);
+			pname = NULL;
+		}
+		if (pname) {
+			free(pname);
+			return 1;
+		}
+	}
+	return 0;
+}
+
 int main(int argc, char **argv) {
 	server = getenv("OBSCTL_SERVER");
 	passwd = getenv("OBSCTL_PASSWD");
 
 	int opt;
+	int optindex;
+	int help = 0;
 
-	while ((opt = getopt(argc, argv, "s:p:")) != -1) {
+	const char *short_options = "s:p:h";
+	struct option long_options[] = {
+		{ "server", required_argument, NULL, 's' },
+		{ "passwd", required_argument, NULL, 'p' },
+		{ "help",   no_argument,       NULL, 'h' },
+	};
+
+	while ((opt = getopt_long(argc, argv, short_options, long_options, &optindex)) != -1) {
 		switch (opt) {
 			case 's': server = optarg; break;
 			case 'p': passwd = optarg; break;
+			case 'h': help = 1; break;
+			default: break;
 		}
 	}
 
+	if (help) {
+		print_usage(argc - optind, &argv[optind], stdout);
+		return 0;
+	}
+
 	if (optind == argc) {
-		fprintf(stderr, "provide a command\n");
+		print_usage(0, NULL, stderr);
 		return 1;
 	}
 
-	req = &argv[optind];
+	const struct Command *cmd = &obsctl_cmd;
+	int start_param = 0;
+	for (start_param = optind; start_param < argc; start_param++) {
+		cmd = get_subcmd(cmd, argv[start_param]);
+		if (cmd == NULL) {
+			print_usage(argc - optind, &argv[optind], stderr);
+			return 1;
+		}
+		if (cmd->type) {
+			start_param++;
+			break;
+		}
+	}
+
+	if (!cmd->type) {
+		print_usage(argc - optind, &argv[optind], stderr);
+		return 1;
+	}
 
 	if (!server) server = "ws://localhost:4455";
 	if (strncmp(server, "ws://", 5) != 0 || strchr(server+5, ':') == NULL) {
 		fprintf(stderr, "server must be a valid websocket address\n");
 		return 1;
 	}
+
+	struct json_object *data = json_object_new_object();
+	if (parse_params(cmd, argc - start_param, &argv[start_param], data) != 0) {
+		print_usage(argc - optind, &argv[optind], stderr);
+		return 1;
+	}
+
+	struct json_object *op = json_object_new_int(6);
+	struct json_object *d = json_object_new_object();
+
+	json_object_object_add(d, "requestType", json_object_new_string(cmd->type));
+	json_object_object_add(d, "requestId", json_object_new_int(0));
+	json_object_object_add(d, "requestData", data);
+
+	request = json_object_new_object();
+	json_object_object_add(request, "op", op);
+	json_object_object_add(request, "d", d);
 
 	char *host = strdup(server + 5);
 	char *col = strchr(host, ':');
@@ -161,4 +287,5 @@ int main(int argc, char **argv) {
 	}
 
 	lws_context_destroy(ctx);
+	json_object_put(request);
 }

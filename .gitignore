@@ -1,2 +1,4 @@
 obsctl
 venv
+protocol.json
+commands.h
