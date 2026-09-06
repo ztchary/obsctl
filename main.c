@@ -1,61 +1,50 @@
 #include <libwebsockets.h>
 #include <json-c/json.h>
+#include <openssl/sha.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <getopt.h>
-#include "usage.h"
+#include "commands.h"
 
 bool run = true;
 int ret = 1;
+char *server;
 char *passwd;
-
-int sha256sum(const char *input, size_t input_len, char *output) {
-    struct lws_genhash_ctx ctx;
-    
-    if (lws_genhash_init(&ctx, LWS_GENHASH_TYPE_SHA256)) return -1;
-
-    if (lws_genhash_update(&ctx, input, input_len)) {
-        lws_genhash_destroy(&ctx, NULL);
-        return -1;
-    }
-
-    return lws_genhash_destroy(&ctx, output);
-}
+char **req;
 
 int compute_auth(const char *pass, const char *salt, const char *chal, char *out) {
 	char concat[256];
-	char hash[32];
+	char hash[32] = {0};
 	char secret[64];
 	int len;
 
 	len = snprintf(concat, sizeof(concat), "%s%s", pass, salt);
-	sha256sum(concat, len, hash);
+	SHA256((unsigned char *)concat, len, (unsigned char *)hash);
 	lws_b64_encode_string(hash, 32, secret, sizeof(secret));
 
-	len = snprintf(concat, sizeof(concat), "%s%s", secret, chal);
-	sha256sum(concat, len, hash);
-	return lws_b64_encode_string(hash, 32, out, 128);
+	len = snprintf(concat, sizeof(concat), "%s%s", secret, chal); SHA256((unsigned char *)concat, len, (unsigned char *)hash); return lws_b64_encode_string(hash, 32, out, 128);
 }
 
 static int ws_callback(struct lws *wsi, enum lws_callback_reasons reason, void *user, void *in, size_t len) {
-	printf("%d\n", reason);
 	if (reason != LWS_CALLBACK_CLIENT_RECEIVE) {
 		switch (reason) {
 			case LWS_CALLBACK_CLIENT_CONNECTION_ERROR:
 				fprintf(stderr, "failed to connect to obs\n");
 				run = false;
 				break;
+			case LWS_CALLBACK_WS_PEER_INITIATED_CLOSE:
+				fprintf(stderr, "incorrect password\n");
+				run = false;
 			default:
 				break;
 		}
 		return 0;
 	}
 
-	printf("(((%s)))\n", (char *)in);	
-
-	struct json_object *jr = json_tokener_parse((char *)in);
-	struct json_object *jop, *jd, *jauth, *jsalt, *jchal;
+	char *raw = strndup((char *)in, len);
+	struct json_object *jr = json_tokener_parse(raw);
+	struct json_object *jop, *jd, *ja, *jb, *jc;
 
 	json_object_object_get_ex(jr, "op", &jop);
 	json_object_object_get_ex(jr, "d", &jd);
@@ -70,27 +59,44 @@ static int ws_callback(struct lws *wsi, enum lws_callback_reasons reason, void *
 
 	switch (op) {
 	case 0: // hello
-		if (json_object_object_get_ex(jd, "authentication", &jauth)) {
+		if (json_object_object_get_ex(jd, "authentication", &ja)) {
 			if (passwd == NULL) {
 				fprintf(stderr, "server requires a password\n");
 				run = false;
 				break;
 			}
-			json_object_object_get_ex(jr, "salt", &jsalt);
-			salt = json_object_get_string(jsalt);
-			json_object_object_get_ex(jr, "challenge", &jchal);
-			chal = json_object_get_string(jchal);
+			json_object_object_get_ex(ja, "salt", &jb);
+			salt = json_object_get_string(jb);
+			json_object_object_get_ex(ja, "challenge", &jc);
+			chal = json_object_get_string(jc);
 
 			compute_auth(passwd, salt, chal, authstr);
 			printlen = snprintf(authjson, sizeof(authjson), ",\"authentication\":\"%s\"", authstr);
 		}
-		snprintf(buf + LWS_PRE, sizeof(buf), "{\"op\":1,\"d\":{\"rpcVersion\":1%s}}", authjson);
+		printlen = snprintf(buf + LWS_PRE, sizeof(buf), "{\"op\":1,\"d\":{\"rpcVersion\":1%s}}", authjson);
 		lws_write(wsi, (unsigned char *)buf + LWS_PRE, printlen, LWS_WRITE_TEXT);
 		break;
-	case 2: // auth success
+	case 2:
+		printlen = snprintf(buf + LWS_PRE, sizeof(buf), "{\"op\":6,\"d\":{\"requestId\":0,\"requestType\":\"%s\"%s}}", req[0], req[1] ? req[1] : "");
+		lws_write(wsi, (unsigned char *)buf + LWS_PRE, printlen, LWS_WRITE_TEXT);
+		break;
+	case 7:
+		run = false;
+		json_object_object_get_ex(jd, "requestStatus", &ja);
+		json_object_object_get_ex(ja, "code", &jb);
+		if (json_object_get_int(jb) != 100) {
+			fprintf(stderr, "request failed\n");
+			break;
+		}
+		json_object_object_get_ex(jd, "responseData", &ja);
+		const char *form = json_object_to_json_string_ext(ja, JSON_C_TO_STRING_PRETTY);
+		printf("%s\n", form);
+		ret = 0;
+		break;
 	}
 
 	json_object_put(jr);
+	free(raw);
 	return 0;
 }
 
@@ -100,8 +106,8 @@ static const struct lws_protocols protocols[] = {
 };
 
 int main(int argc, char **argv) {
-	char *server = getenv("OBS_SERVER");
-	passwd = getenv("OBS_PASSWD");
+	server = getenv("OBSCTL_SERVER");
+	passwd = getenv("OBSCTL_PASSWD");
 
 	int opt;
 
@@ -116,6 +122,8 @@ int main(int argc, char **argv) {
 		fprintf(stderr, "provide a command\n");
 		return 1;
 	}
+
+	req = &argv[optind];
 
 	if (!server) server = "ws://localhost:4455";
 	if (strncmp(server, "ws://", 5) != 0 || strchr(server+5, ':') == NULL) {
