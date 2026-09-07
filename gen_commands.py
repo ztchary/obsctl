@@ -67,23 +67,35 @@ def to_cmd(typ):
         joined.append(t)
     return joined
 
-structs = """\
-struct Param {
+TYPES = ["ANY", "STRING", "NUMBER", "BOOLEAN", "OBJECT", "ARRAYSTRING", "ARRAYOBJECT"]
+
+structs = f"""\
+enum ParamType {{
+    {",\n\t".join(TYPES)}
+}};
+
+const char *param_type_strs[] = {{
+{"\n".join(f"\t[{t}] = \"{t}\"," for t in TYPES)}
+}};
+
+struct Param {{
     const char *name;
     const char *desc;
-    int type;
+    enum ParamType type;
     int opt;
-};
+}};
 
-struct Command {
+struct Command {{
 	const char *cmd;
     const char *desc;
     const char *type;
     const struct Param *param;
+    const struct Param *resp;
     const struct Command **sub;
     int nparam;
+    int nresp;
     int nsub;
-};
+}};
 \n"""
 
 TYPES = {
@@ -129,13 +141,20 @@ for req in protocol["requests"]:
     cur["desc"] = desc
     cur["typ"] = typ
     cur["param"] = []
+    cur["resp"] = []
     
     for param in sorted(req["requestFields"], key=lambda x:x["valueOptional"]):
         name = json.dumps(param["valueName"])
         desc = json.dumps(param["valueDescription"])
-        typ = TYPES[param["valueType"]]
+        typ = param["valueType"].upper()
         opt = 1 if param["valueOptional"] else 0
         cur["param"].append(f"\t{{ {name}, {desc}, {typ}, {opt} }},")
+
+    for param in req["responseFields"]:
+        name = json.dumps(param["valueName"])
+        desc = json.dumps(param["valueDescription"])
+        typ = re.sub("[<>]", "", param["valueType"].upper())
+        cur["resp"].append(f"\t{{ {name}, {desc}, {typ} }},")
 
 c_lines = []
 
@@ -157,7 +176,12 @@ def walk(node, id, cmd):
         c_lines.append(f"static const struct Param {node["typ"]}_param[] = {{"); #}) bum ahh treesitter
         c_lines.extend(node["param"])
         c_lines.append(f"}};\n")
-        
+
+    doresp = "resp" in node and len(node["resp"]) > 0
+    if doresp:
+        c_lines.append(f"static const struct Param {node["typ"]}_resp[] = {{"); #})
+        c_lines.extend(node["resp"])
+        c_lines.append(f"}};\n")
 
     c_lines.extend([
         f"static const struct Command {id}_cmd = {{", # }
@@ -165,8 +189,10 @@ def walk(node, id, cmd):
         f"\t{json.dumps(node["desc"]) if "desc" in node else "NULL"},",
         f"\t{json.dumps(node["typ"]) if "typ" in node else "NULL"},",
         f"\t{node["typ"]}_param," if doparam else "\tNULL,",
+        f"\t{node["typ"]}_resp," if doresp else "\tNULL,",
         f"\t{id}_subcmd," if "sub" in node else "\tNULL,",
-        f"\t{len(node["param"]) if "param" in node else 0},",
+        f"\t{len(node["param"]) if doparam else 0},",
+        f"\t{len(node["resp"]) if doresp else 0},",
         f"\t{len(child_ids)}",
         f"}};\n"
     ])

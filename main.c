@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <getopt.h>
+#include <assert.h>
 #include "commands.h"
 
 int run = 1;
@@ -35,7 +36,9 @@ int compute_auth(const char *pass, const char *salt, const char *chal, char *out
 	SHA256((unsigned char *)concat, len, (unsigned char *)hash);
 	lws_b64_encode_string(hash, 32, secret, sizeof(secret));
 
-	len = snprintf(concat, sizeof(concat), "%s%s", secret, chal); SHA256((unsigned char *)concat, len, (unsigned char *)hash); return lws_b64_encode_string(hash, 32, out, 128);
+	len = snprintf(concat, sizeof(concat), "%s%s", secret, chal);
+	SHA256((unsigned char *)concat, len, (unsigned char *)hash);
+	return lws_b64_encode_string(hash, 32, out, 128);
 }
 
 static int ws_callback(struct lws *wsi, enum lws_callback_reasons reason, void *user, void *in, size_t len) {
@@ -97,7 +100,8 @@ static int ws_callback(struct lws *wsi, enum lws_callback_reasons reason, void *
 		json_object_object_get_ex(jd, "requestStatus", &ja);
 		json_object_object_get_ex(ja, "code", &jb);
 		if (json_object_get_int(jb) != 100) {
-			fprintf(stderr, "request failed\n");
+			json_object_object_get_ex(ja, "comment", &jb);
+			fprintf(stderr, "request failed\n%s\n", json_object_get_string(jb));
 			break;
 		}
 		json_object_object_get_ex(jd, "responseData", &ja);
@@ -140,10 +144,20 @@ void print_usage(int argc, char **argv, FILE *out) {
 			const struct Param *param = &cmd->param[i];
 			sprintf(fullcmd + strlen(fullcmd), param->opt ? " [%s]" : " <%s>", param->name);
 		}
-		fprintf(out, "Usage: %s\n\n%s\n\nParams:\n", fullcmd, cmd->desc);
-		for (int i = 0; i < cmd->nparam; i++) {
-			const struct Param *param = &cmd->param[i];
-			fprintf(out, "  %s: %s (%s)\n", param->name, param->desc, param->opt ? "optional" : "required");
+		fprintf(out, "Usage: %s\n\n%s\n", fullcmd, cmd->desc);
+		if (cmd->nparam) {
+			fprintf(out, "\nParams:\n");
+			for (int i = 0; i < cmd->nparam; i++) {
+				const struct Param *param = &cmd->param[i];
+				fprintf(out, "  %s (%s): %s\n", param->name, param_type_strs[param->type], param->desc);
+			}
+		}
+		if (cmd->nresp) {
+			fprintf(out, "\nResponse:\n");
+			for (int i = 0; i < cmd->nresp; i++) {
+				const struct Param *resp = &cmd->resp[i];
+				fprintf(out, "  %s (%s): %s\n", resp->name, param_type_strs[resp->type], resp->desc);
+			}
 		}
 		return;
 	}
@@ -159,13 +173,47 @@ void print_usage(int argc, char **argv, FILE *out) {
 	}
 }
 
+int set_field_typed(struct json_object *data, const char *field, const char *value, enum ParamType type) {
+	long nval;
+	char *end;
+	struct json_object *jr;
+	switch (type) {
+		case STRING:
+			json_object_object_add(data, field, json_object_new_string(value));
+			break;
+		case NUMBER:
+			nval = strtol(value, &end, 10);
+			if (*end != 0) {
+				fprintf(stderr, "parameter '%s' expects NUMBER, got '%s'\n", field, value);
+				return -1;
+			}
+			json_object_object_add(data, field, json_object_new_int(nval));
+			break;
+		case OBJECT: case ANY:
+			jr = json_tokener_parse(value);
+			if (!jr) {
+				fprintf(stderr, "parameter '%s' expects OBJECT, got '%s'\n", field, value);
+				return -1;
+			}
+			json_object_object_add(data, field, jr);
+			break;
+		case BOOLEAN:
+			nval = strchr("ty1", value[0]) != NULL;
+			json_object_object_add(data, field, json_object_new_boolean(nval));
+			break;
+		default:
+			assert(0 && "unreachable");
+	}
+	return 0;
+}
+
 int parse_params(const struct Command *cmd, int argc, char **argv, struct json_object *data) {
 	int i;
 	for (i = 0; i < cmd->nparam; i++) {
 		if (cmd->param[i].opt) break;
 		if (argc == 0) return -1;
 		argc--;
-		json_object_object_add(data, cmd->param[i].name, json_object_new_string(*(argv++)));
+		if (set_field_typed(data, cmd->param[i].name, *(argv++), cmd->param[i].type) != 0) return -1;
 	}
 	int start_opt = i;
 	while (argc > 0) {
@@ -173,7 +221,7 @@ int parse_params(const struct Command *cmd, int argc, char **argv, struct json_o
 		const char *eq = strchr(*argv, '=');
 		if (!eq) {
 			argc--;
-			json_object_object_add(data, cmd->param[i++].name, json_object_new_string(*(argv++)));
+		if (set_field_typed(data, cmd->param[i].name, *(argv++), cmd->param[i].type) != 0) return -1;
 			continue;
 		}
 		char *pname = strndup(*argv, eq++ - *argv);
@@ -181,7 +229,7 @@ int parse_params(const struct Command *cmd, int argc, char **argv, struct json_o
 		for (int j = start_opt; j < cmd->nparam; j++) {
 			if (strcmp(cmd->param[j].name, pname) != 0) continue;
 			argc--; argv++; i++;
-			json_object_object_add(data, pname, json_object_new_string(eq));
+			if (set_field_typed(data, pname, eq, cmd->param[j].type) != 0) return -1;
 			success = 1;
 			break;
 		}
