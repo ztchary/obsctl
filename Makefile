@@ -8,10 +8,7 @@ all: obsctl
 obsctl: *.c commands.h
 	gcc $(CFLAGS) -o obsctl *.c $(LIBS)
 
-protocol.json:
-	wget https://raw.githubusercontent.com/obsproject/obs-websocket/refs/heads/master/docs/generated/protocol.json
-
-commands.h: protocol.json gen_commands.py
+commands.h: gen_commands.py
 	python3 gen_commands.py
 
 readme: obsctl
@@ -22,7 +19,6 @@ install: obsctl
 	install -m 755 obsctl /usr/bin
 
 clean:
-	rm -f protocol.json
 	rm -f commands.h
 	rm -f obsctl
 

@@ -156,7 +156,7 @@ void print_usage(int argc, char **argv, FILE *out) {
 			fprintf(out, "\nResponse:\n");
 			for (int i = 0; i < cmd->nresp; i++) {
 				const struct Param *resp = &cmd->resp[i];
-				fprintf(out, "  %s (%s): %s\n", resp->name, param_type_strs[resp->type], resp->desc);
+				fprintf(out, "  %s (%s%s): %s\n", resp->name, param_type_strs[resp->type], resp->opt ? "" : ", required", resp->desc);
 			}
 		}
 		return;

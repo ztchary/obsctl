@@ -1,3 +1,4 @@
+import urllib.request
 import json
 import re
 
@@ -8,8 +9,13 @@ def parsetype(typ):
     matches = re.findall('[A-Z][a-z]*', typ)
     return [w.lower() for w in matches]
 
-with open("protocol.json") as f:
-    protocol = json.load(f)
+SRC = "https://raw.githubusercontent.com/obsproject/obs-websocket/refs/heads/master/docs/generated/protocol.json"
+
+try:
+    with urllib.request.urlopen(SRC) as response:
+        protocol = json.loads(response.read().decode())
+except:
+    exit(1)
 
 LEVELS = [
     [
